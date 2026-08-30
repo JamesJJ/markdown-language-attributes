@@ -1,0 +1,31 @@
+name: Workflow lint
+
+# Validates the workflow files themselves: YAML syntax/style (yamllint) and
+# GitHub Actions schema + expressions (actionlint).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-workflows:
+    name: Lint workflows (yamllint + actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Lint YAML style (yamllint)
+        run: yamllint .github/workflows .yamllint.yml
+
+      - name: Validate Actions schema (actionlint)
+        uses: raven-actions/actionlint@v2.2.0
+        with:
+          files: '.github/workflows/*.yml'

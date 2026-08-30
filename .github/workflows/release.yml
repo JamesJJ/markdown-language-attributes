@@ -1,0 +1,104 @@
+name: Release
+
+# Every push to main is built for all target platforms and auto-released with a
+# timestamp tag v0.<yyyymmdd>.<hhmmss>. Only the latest 3 releases are kept.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create tags, releases, and delete old releases
+
+concurrency:
+  # A newer push to main cancels an in-flight release build.
+  group: release-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64 # GitHub runner architecture
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64 # Apple Silicon
+          - goos: darwin
+            goarch: amd64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+
+      - name: Compute timestamp release tag
+        id: tag
+        run: echo "tag=v0.$(date -u +%Y%m%d).$(date -u +%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary and checksum
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          out="mdlang-${GOOS}-${GOARCH}"
+          go build -trimpath -ldflags "-s -w -X main.version=${{ steps.tag.outputs.tag }}" -o "$out" .
+          sha256sum "$out" > "$out.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdlang-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            mdlang-${{ matrix.goos }}-${{ matrix.goarch }}
+            mdlang-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+          retention-days: 7
+
+  release:
+    name: Publish release & prune old
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
+            --notes "Automated build of ${GITHUB_SHA}." \
+            dist/*
+
+      - name: Prune to the latest 3 releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # List releases newest-first by creation, skip the newest 3, delete
+          # the rest (release and its tag).
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+          | while read -r old; do
+              [ -z "$old" ] && continue
+              echo "Deleting old release $old"
+              gh release delete "$old" --cleanup-tag --yes
+            done
