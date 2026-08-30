@@ -134,3 +134,33 @@ func TestAsciiAdjacentKnob(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func passthroughCfg() Config {
+	c := DefaultConfig()
+	c.Mode = ModePassthrough
+	return c
+}
+
+func TestSkipsYAMLFrontMatter(t *testing.T) {
+	in := "---\ntitle: 水餃\ntags:\n- 好吃 Food\n---\n\nBody with 台灣 here.\n"
+	want := "---\ntitle: 水餃\ntags:\n- 好吃 Food\n---\n\nBody with <!--lang:zh-->台灣<!--/lang--> here.\n"
+	if got := string(Tag([]byte(in), passthroughCfg())); got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestSkipsTOMLFrontMatter(t *testing.T) {
+	in := "+++\ntitle = \"水餃\"\n+++\n\n台灣 body\n"
+	want := "+++\ntitle = \"水餃\"\n+++\n\n<!--lang:zh-->台灣<!--/lang--> body\n"
+	if got := string(Tag([]byte(in), passthroughCfg())); got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestNoFrontMatterUnaffected(t *testing.T) {
+	in := "Just 台灣 body, no front matter.\n"
+	want := "Just <!--lang:zh-->台灣<!--/lang--> body, no front matter.\n"
+	if got := string(Tag([]byte(in), passthroughCfg())); got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}

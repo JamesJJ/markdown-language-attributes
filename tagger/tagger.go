@@ -157,6 +157,23 @@ func Tag(src []byte, cfg Config) []byte {
 	if cfg.IDNSecondLabelMax == 0 {
 		cfg.IDNSecondLabelMax = 3
 	}
+	// Never touch a leading front-matter block. Hugo strips front matter
+	// before goldmark sees it, but here goldmark parses the whole file, so
+	// CJK in YAML/TOML/JSON front matter (titles, tags) would be marked and
+	// the front matter corrupted. Process only the body after it.
+	front, body := splitFrontMatter(src)
+	tagged := tagBody(body, cfg)
+	if len(front) == 0 {
+		return tagged
+	}
+	out := make([]byte, 0, len(front)+len(tagged))
+	out = append(out, front...)
+	out = append(out, tagged...)
+	return out
+}
+
+// tagBody runs the marker pass over content that has no front matter.
+func tagBody(src []byte, cfg Config) []byte {
 	md := goldmark.New()
 	doc := md.Parser().Parse(text.NewReader(src))
 
@@ -186,6 +203,94 @@ func Tag(src []byte, cfg Config) []byte {
 		return src
 	}
 	return applyEdits(src, edits)
+}
+
+// splitFrontMatter returns (front, body). front is a leading front-matter
+// block INCLUDING its closing fence and trailing newline, or empty if none.
+// Recognises YAML (--- … ---), TOML (+++ … +++), and JSON ({ … } as the very
+// first thing). The block must start at byte 0.
+func splitFrontMatter(src []byte) (front, body []byte) {
+	// YAML / TOML: a fence line, content, a matching closing fence line.
+	for _, fence := range []string{"---", "+++"} {
+		if hasLinePrefix(src, fence) {
+			if end := closingFence(src, fence); end >= 0 {
+				return src[:end], src[end:]
+			}
+		}
+	}
+	// JSON front matter: file begins with '{'. Match to the balanced closing
+	// '}' at line start followed by a newline (Hugo's convention).
+	if len(src) > 0 && src[0] == '{' {
+		if end := jsonFrontMatterEnd(src); end >= 0 {
+			return src[:end], src[end:]
+		}
+	}
+	return nil, src
+}
+
+// hasLinePrefix reports whether src begins with the fence on its own line.
+func hasLinePrefix(src []byte, fence string) bool {
+	if len(src) < len(fence) {
+		return false
+	}
+	if string(src[:len(fence)]) != fence {
+		return false
+	}
+	rest := src[len(fence):]
+	return len(rest) == 0 || rest[0] == '\n' || rest[0] == '\r'
+}
+
+// closingFence returns the byte index just AFTER the closing fence line
+// (including its newline), or -1 if there is no closing fence.
+func closingFence(src []byte, fence string) int {
+	// Start scanning after the opening fence's line.
+	i := 0
+	// skip opening fence line
+	for i < len(src) && src[i] != '\n' {
+		i++
+	}
+	if i < len(src) {
+		i++ // past the newline
+	}
+	for i < len(src) {
+		lineStart := i
+		for i < len(src) && src[i] != '\n' {
+			i++
+		}
+		line := src[lineStart:i]
+		// trim a trailing CR
+		trimmed := line
+		if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\r' {
+			trimmed = trimmed[:len(trimmed)-1]
+		}
+		if i < len(src) {
+			i++ // consume newline
+		}
+		if string(trimmed) == fence {
+			return i // just past the closing fence line + newline
+		}
+	}
+	return -1
+}
+
+// jsonFrontMatterEnd returns the index just after a leading JSON object's
+// closing '}' line (Hugo writes the closing brace at column 0), or -1.
+func jsonFrontMatterEnd(src []byte) int {
+	i := 0
+	for i < len(src) {
+		lineStart := i
+		for i < len(src) && src[i] != '\n' {
+			i++
+		}
+		line := src[lineStart:i]
+		if i < len(src) {
+			i++
+		}
+		if len(line) > 0 && line[0] == '}' {
+			return i
+		}
+	}
+	return -1
 }
 
 func collectRuns(src []byte, start, stop int, cfg Config, edits *[]edit) {
