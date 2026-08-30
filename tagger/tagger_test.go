@@ -164,3 +164,63 @@ func TestNoFrontMatterUnaffected(t *testing.T) {
 		t.Fatalf("\n got:  %q\n want: %q", got, want)
 	}
 }
+
+// --- CJK prose abutting Latin words (option a) -------------------------------
+
+func TestProseCJKAbuttingLatinIsTagged(t *testing.T) {
+	// A Latin proper noun merely abutting CJK is prose, not an identifier:
+	// tag the CJK runs, leave the Latin word bare.
+	got := tagMode("台灣到Frankfurt沒問題", ModeMarkers)
+	want := "{{zh}}台灣到{{/zh}}Frankfurt{{zh}}沒問題{{/zh}}"
+	if got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestIdentifierGluedBothSidesSkipped(t *testing.T) {
+	// CJK glued to ASCII letters on BOTH sides is one identifier-like token.
+	if got := tagMode("wifi台灣net", ModeMarkers); got != "wifi台灣net" {
+		t.Fatalf("identifier was modified: %q", got)
+	}
+}
+
+func TestStructuralTokenSkipped(t *testing.T) {
+	// A token containing a URL/identifier structural char (. / : @) is skipped.
+	for _, in := range []string{"台灣.com", "host/台灣", "user@台灣"} {
+		if got := tagMode(in, ModeMarkers); got != in {
+			t.Errorf("structural token modified: in=%q got=%q", in, got)
+		}
+	}
+}
+
+func TestLinkTextNotCaughtByURLSlashes(t *testing.T) {
+	// The structural-token scan must stop at markdown []() so a link's text is
+	// still tagged even though its destination has slashes.
+	got := tagMode("See [台灣](/p/q/).", ModeMarkers)
+	want := "See [{{zh}}台灣{{/zh}}](/p/q/)."
+	if got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestMixedProseParagraph(t *testing.T) {
+	// The mr-baozi paragraph: CJK tagged, Latin place-names left bare. NOTE a
+	// known edge of the "glued both sides" rule: CJK particles sandwiched
+	// between two Latin words with no spaces (Frankfurt到Heathrow也OK) are
+	// treated as identifier-internal and left untagged.
+	in := "台灣到Frankfurt沒問題， Frankfurt到Heathrow也OK，但是在Heathrow有一個大問題！"
+	got := tagMode(in, ModePassthrough)
+	want := "<!--lang:zh-->台灣到<!--/lang-->Frankfurt<!--lang:zh-->沒問題<!--/lang-->， Frankfurt到Heathrow也OK，<!--lang:zh-->但是在<!--/lang-->Heathrow<!--lang:zh-->有一個大問題<!--/lang-->！"
+	if got != want {
+		t.Fatalf("\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestAlreadyMarkedContentIsNoOp(t *testing.T) {
+	// Already-wrapped content is an HTML comment block (RawHTML to goldmark);
+	// the walker skips it, so a second pass changes nothing.
+	in := "<!--lang:zh-->在台灣認識朋友。台灣到Frankfurt沒問題！<!--/lang-->"
+	if got := tagMode(in, ModePassthrough); got != in {
+		t.Fatalf("already-marked content was modified:\n in:  %q\n got: %q", in, got)
+	}
+}

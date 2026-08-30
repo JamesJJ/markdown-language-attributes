@@ -378,11 +378,51 @@ func shouldSkip(src []byte, start, end int, cfg Config) bool {
 	if start >= 4 && strings.EqualFold(string(src[start-4:start]), "www.") {
 		return true
 	}
-	if !cfg.TagAsciiAdjacent && (asciiLetterBefore(src, start) || asciiLetterAfter(src, end)) {
-		return true
+	// Identifier/URL heuristic (unless explicitly overridden). Prose where a
+	// Latin proper noun merely abuts CJK (台灣到Frankfurt沒問題) is TAGGED — only
+	// genuine URL/identifier tokens are skipped:
+	//   - the run's whitespace-free token contains a structural char . / : @
+	//     (URLs, hosts, paths): 台灣.com, host/台灣, a@台灣
+	//   - the run is glued to ASCII letters on BOTH sides (one word): wifi台灣net
+	if !cfg.TagAsciiAdjacent {
+		if tokenHasStructural(src, start, end) {
+			return true
+		}
+		if asciiLetterBefore(src, start) && asciiLetterAfter(src, end) {
+			return true
+		}
 	}
 	if idnForward(src, start, end, cfg.IDNSecondLabelMax) || idnBackward(src, start, cfg.IDNSecondLabelMax) {
 		return true
+	}
+	return false
+}
+
+// tokenHasStructural reports whether the whitespace-delimited token containing
+// the run [start:end] includes a URL/identifier structural character (. / : @).
+// Markdown link punctuation ([]() ) also delimits the token, so CJK in a link's
+// text is not falsely captured by the destination's slashes.
+func tokenHasStructural(src []byte, start, end int) bool {
+	isBoundary := func(b byte) bool {
+		switch b {
+		case ' ', '\t', '\n', '\r', '[', ']', '(', ')':
+			return true
+		}
+		return false
+	}
+	l := start
+	for l > 0 && !isBoundary(src[l-1]) {
+		l--
+	}
+	r := end
+	for r < len(src) && !isBoundary(src[r]) {
+		r++
+	}
+	for i := l; i < r; i++ {
+		switch src[i] {
+		case '.', '/', ':', '@':
+			return true
+		}
 	}
 	return false
 }
