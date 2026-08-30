@@ -1,0 +1,12 @@
+# Binaries
+/mdlang
+/dist/
+*.exe
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Editor / OS
+.DS_Store
