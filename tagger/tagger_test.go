@@ -8,36 +8,50 @@ func tagMode(s string, m Mode) string {
 	return string(Tag([]byte(s), cfg))
 }
 
-// markerCase gives the expected output in each mode for one input. The zh/ja
-// wrappers differ per mode; cases express the input and the run boundaries via
-// the markers mode, then the other modes are derived by re-wrapping.
+// markersCases is the canonical positive/negative table (markers mode). Outputs
+// were verified against the tagger; "(unchanged)" cases assert the input is
+// returned verbatim.
 var markersCases = []struct {
 	name string
 	in   string
-	out  string // markers mode
+	out  string
 }{
+	// positive — should tag
 	{"plain english", "Plain English only.", "Plain English only."},
-	{"single han run", "from 桃園 today", "from {{zh}}桃園{{/zh}} today"},
-	{"run at start", "台灣 is home", "{{zh}}台灣{{/zh}} is home"},
+	{"single han run", "Rescued me from 桃園 at midnight.", "Rescued me from {{zh}}桃園{{/zh}} at midnight."},
+	{"run at start", "台灣 is an island.", "{{zh}}台灣{{/zh}} is an island."},
+	{"run at end", "An island: 台灣", "An island: {{zh}}台灣{{/zh}}"},
+	{"whole string han", "台灣", "{{zh}}台灣{{/zh}}"},
+	{"two separate runs", "from 台北 to 高雄 today", "from {{zh}}台北{{/zh}} to {{zh}}高雄{{/zh}} today"},
 	{"join fullwidth comma", "spices 五香粉，黑胡椒 today", "spices {{zh}}五香粉，黑胡椒{{/zh}} today"},
 	{"interior digits", "在2013年8月時", "{{zh}}在2013年8月時{{/zh}}"},
-	{"leading digit joins", "Date 8月8日 here", "Date {{zh}}8月8日{{/zh}} here"},
-	{"leading digit space", "Date 8 月 here", "Date {{zh}}8 月{{/zh}} here"},
+	{"leading digit no space", "Date 8月8日 here.", "Date {{zh}}8月8日{{/zh}} here."},
+	{"leading digit space", "Date 8 月 here.", "Date {{zh}}8 月{{/zh}} here."},
+	{"digit-space-han", "有 3 個蘋果", "{{zh}}有 3 個蘋果{{/zh}}"},
 	{"trailing period excluded", "去台灣。Next", "{{zh}}去台灣{{/zh}}。Next"},
-	{"brackets excluded", "「保生大帝」x", "「{{zh}}保生大帝{{/zh}}」x"},
-	{"cjk brackets around english", "「english」x", "「english」x"},
-	{"hiragana → ja", "こんにちは world", "{{ja}}こんにちは{{/ja}} world"},
-	{"katakana → ja", "カタカナ test", "{{ja}}カタカナ{{/ja}} test"},
-	{"han+kana → ja", "日本語のテスト done", "{{ja}}日本語のテスト{{/ja}} done"},
-	{"inline code untouched", "Run `台灣` x", "Run `台灣` x"},
-	{"link text tagged url not", "See [台灣](/p/q/).", "See [{{zh}}台灣{{/zh}}](/p/q/)."},
-	{"ascii-adjacent as-is", "wifi台灣net", "wifi台灣net"},
-	{"scheme url as-is", "see http://台灣.example here", "see http://台灣.example here"},
-	{"www host as-is", "visit www.台灣today", "visit www.台灣today"},
-	{"idn two-label as-is", "go 例子.測試 now", "go 例子.測試 now"},
-	{"idn cjk dot com as-is", "at 台灣.com here", "at 台灣.com here"},
-	{"link mirrors url as-is", "[台灣](https://台灣.example/台灣)", "[台灣](https://台灣.example/台灣)"},
-	{"multiline", "First 台北\n\nSecond 高雄", "First {{zh}}台北{{/zh}}\n\nSecond {{zh}}高雄{{/zh}}"},
+	{"brackets excluded (han)", "「保生大帝」here", "「{{zh}}保生大帝{{/zh}}」here"},
+	{"hiragana ja", "こんにちは world", "{{ja}}こんにちは{{/ja}} world"},
+	{"katakana ja", "カタカナ test", "{{ja}}カタカナ{{/ja}} test"},
+	{"han+kana ja", "日本語のテスト done", "{{ja}}日本語のテスト{{/ja}} done"},
+	{"link text (url intact)", "See [台灣](/path/somewhere/).", "See [{{zh}}台灣{{/zh}}](/path/somewhere/)."},
+	{"emphasis around", "*台灣* rocks", "*{{zh}}台灣{{/zh}}* rocks"},
+	{"heading", "# 台灣 heading", "# {{zh}}台灣{{/zh}} heading"},
+	{"multi-paragraph", "First 台北\n\nSecond 高雄", "First {{zh}}台北{{/zh}}\n\nSecond {{zh}}高雄{{/zh}}"},
+	// ascii before han (left-only) is prose under option (a): TAGGED.
+	{"ascii before han (left only)", "x台灣", "x{{zh}}台灣{{/zh}}"},
+
+	// negative — should be left unchanged
+	{"punct-only", "。。。 alone", "。。。 alone"},
+	{"cjk brackets + english", "「english」word", "「english」word"},
+	{"inline code", "Run `台灣` verbatim.", "Run `台灣` verbatim."},
+	{"ascii-han-ascii (both sides)", "wifi台灣net", "wifi台灣net"},
+	{"scheme url", "see http://台灣.example for more", "see http://台灣.example for more"},
+	{"www host", "visit www.台灣today", "visit www.台灣today"},
+	{"idn two-label", "go to 例子.測試 now", "go to 例子.測試 now"},
+	{"idn cjk.com", "at 台灣.com here", "at 台灣.com here"},
+	{"link mirrors url", "[台灣](https://台灣.example/台灣)", "[台灣](https://台灣.example/台灣)"},
+	{"idempotent zh", "from {{zh}}桃園{{/zh}} today", "from {{zh}}桃園{{/zh}} today"},
+	{"idempotent ja", "say {{ja}}こんにちは{{/ja}} now", "say {{ja}}こんにちは{{/ja}} now"},
 }
 
 func TestMarkersMode(t *testing.T) {
