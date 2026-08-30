@@ -1,17 +1,20 @@
-// Command mdlang wraps runs of a target Unicode script in Markdown files with
-// configurable delimiters, using the Markdown AST so that code, links, and raw
+// Command mdlang wraps runs of Chinese and Japanese script in Markdown files
+// with language markers, using the Markdown AST so that code, links, and raw
 // HTML are never modified.
 //
-// Typical use is a CI step that inserts inline markers a static-site generator
-// then renders as language spans. The tool itself is generator-agnostic.
+// The output form is selected by the required -mode flag:
+//
+//	markers      {{zh}}…{{/zh}}                {{ja}}…{{/ja}}
+//	passthrough  <!--lang:zh-->…<!--/lang-->    <!--lang:ja-->…<!--/lang-->
+//	spans        <span lang="zh-Hant-TW">…</span> <span lang="ja">…</span>
 //
 // Usage:
 //
-//	mdlang [flags] [file ...]
+//	mdlang -mode=<markers|passthrough|spans> [flags] [file ...]
 //
 // With no file arguments it reads stdin and writes stdout. With files it
-// rewrites each in place unless -stdout is given. Exit status 0 on success;
-// with -check it exits 1 if any file would change (no writes), for CI gating.
+// rewrites each in place unless -stdout is given. With -check it makes no
+// changes and exits 1 if any input would change (for CI).
 package main
 
 import (
@@ -29,12 +32,9 @@ var version = "dev"
 func main() {
 	var (
 		showVersion = flag.Bool("version", false, "print version and exit")
-		zhOpen      = flag.String("zh-open", "{{zh}}", "opening delimiter for a pure-Han (Chinese) run")
-		zhClose     = flag.String("zh-close", "{{/zh}}", "closing delimiter for a pure-Han (Chinese) run")
-		jpOpen      = flag.String("jp-open", "{{jp}}", "opening delimiter for a kana-containing (Japanese) run")
-		jpClose     = flag.String("jp-close", "{{/jp}}", "closing delimiter for a kana-containing (Japanese) run")
+		mode        = flag.String("mode", "", "REQUIRED output mode: markers | passthrough | spans")
 		enableZh    = flag.Bool("zh", true, "tag pure-Han (Chinese) runs")
-		enableJp    = flag.Bool("jp", true, "tag kana-containing (Japanese) runs")
+		enableJa    = flag.Bool("ja", true, "tag kana-containing (Japanese) runs")
 		ascii       = flag.Bool("tag-ascii-adjacent", false, "also tag runs glued to ASCII letters (e.g. wifi\u53f0\u7063net)")
 		toStdout    = flag.Bool("stdout", false, "write result to stdout instead of rewriting files in place")
 		check       = flag.Bool("check", false, "do not write; exit 1 if any input would change (for CI)")
@@ -46,10 +46,16 @@ func main() {
 		return
 	}
 
+	m, err := tagger.ParseMode(*mode)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mdlang:", err)
+		fmt.Fprintln(os.Stderr, "the -mode flag is required")
+		os.Exit(2)
+	}
+
 	cfg := tagger.DefaultConfig()
-	cfg.ZhOpen, cfg.ZhClose = *zhOpen, *zhClose
-	cfg.JpOpen, cfg.JpClose = *jpOpen, *jpClose
-	cfg.EnableZh, cfg.EnableJp = *enableZh, *enableJp
+	cfg.Mode = m
+	cfg.EnableZh, cfg.EnableJa = *enableZh, *enableJa
 	cfg.TagAsciiAdjacent = *ascii
 
 	files := flag.Args()

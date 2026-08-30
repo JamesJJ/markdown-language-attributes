@@ -1,13 +1,22 @@
-// Package tagger wraps runs of CJK/Japanese script in a Markdown document with
-// language delimiters, operating on the Markdown AST so that code spans, link
-// destinations, autolinks and raw HTML are never touched.
+// Package tagger wraps runs of Chinese and Japanese script in a Markdown
+// document with language markers, operating on the Markdown AST so that code
+// spans, link destinations, autolinks and raw HTML are never touched.
 //
-// A run of pure Han is tagged with the "zh" delimiters; a run containing any
-// kana (Hiragana/Katakana) is tagged with the "jp" delimiters. Delimiters,
-// scripts and several heuristics are configurable.
+// A run of pure Han is classified "zh"; a run containing any kana
+// (Hiragana/Katakana) is classified "ja". The output form is chosen by Mode:
+//
+//	markers      {{zh}}台灣{{/zh}}                 {{ja}}こんにちは{{/ja}}
+//	passthrough  <!--lang:zh-->台灣<!--/lang-->     <!--lang:ja-->こんにちは<!--/lang-->
+//	spans        <span lang="zh-Hant-TW">台灣</span> <span lang="ja">こんにちは</span>
+//
+// The passthrough form is a valid HTML comment pair: it degrades to invisible
+// comments if the consuming renderer has no handler, and it carries the
+// language code inside the delimited text so a single Hugo render-passthrough
+// hook can route every language.
 package tagger
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -18,40 +27,80 @@ import (
 	"github.com/yuin/goldmark/text"
 )
 
-// Config controls detection and wrapping.
+// Mode selects the output wrapping form.
+type Mode string
+
+const (
+	ModeMarkers     Mode = "markers"
+	ModePassthrough Mode = "passthrough"
+	ModeSpans       Mode = "spans"
+)
+
+// ValidModes lists the accepted -mode values.
+var ValidModes = []Mode{ModeMarkers, ModePassthrough, ModeSpans}
+
+// ParseMode validates a mode string.
+func ParseMode(s string) (Mode, error) {
+	for _, m := range ValidModes {
+		if string(m) == s {
+			return m, nil
+		}
+	}
+	return "", fmt.Errorf("invalid mode %q (want one of: markers, passthrough, spans)", s)
+}
+
+// langCode is the internal classification of a run.
+type langCode string
+
+const (
+	zh langCode = "zh"
+	ja langCode = "ja"
+)
+
+// htmlLang maps an internal code to the BCP-47 tag used in spans mode.
+var htmlLang = map[langCode]string{zh: "zh-Hant-TW", ja: "ja"}
+
+// Config controls detection and output.
 type Config struct {
-	// ZhOpen/ZhClose wrap a run of pure Han (Chinese).
-	ZhOpen, ZhClose string
-	// JpOpen/JpClose wrap a run that contains any kana (Japanese).
-	JpOpen, JpClose string
+	// Mode is the output form. Required — there is no default.
+	Mode Mode
 
-	// EnableZh / EnableJp select which run classes are tagged. Both default
-	// to true. Disabling one leaves those runs untouched (e.g. EnableJp=false
-	// tags only pure-Han runs; kana-containing runs are left as-is).
-	EnableZh, EnableJp bool
+	// EnableZh / EnableJa select which run classes are tagged. Both default
+	// to true via DefaultConfig.
+	EnableZh, EnableJa bool
 
-	// TagAsciiAdjacent, when true, tags a CJK run even when it is glued to
-	// ASCII letters with no separating space (e.g. "wifi台灣net"). Default
-	// false: such runs are left as-is (likely identifiers/slugs).
+	// TagAsciiAdjacent, when true, tags a run glued to ASCII letters with no
+	// separating space (e.g. "wifi台灣net"). Default false.
 	TagAsciiAdjacent bool
 
-	// IDNSecondLabelMax is the maximum glyph length of the SECOND dotted
-	// label for a "<cjk>.<cjk>" sequence to be treated as an IDN host and
-	// left untagged (e.g. 例子.測試). Default 3.
+	// IDNSecondLabelMax is the max glyph length of the other dotted label for
+	// a "<cjk>.<cjk>" sequence to be treated as an IDN host and left untagged.
 	IDNSecondLabelMax int
 }
 
-// DefaultConfig tags Han→{{zh}} and kana→{{jp}}, leaves ascii-adjacent runs
-// as-is, and treats a "<cjk>.<cjk≤3>" sequence as an IDN host.
+// DefaultConfig enables both languages, leaves ascii-adjacent runs as-is, and
+// treats a "<cjk>.<cjk≤3>" sequence as an IDN host. Mode must be set by the
+// caller.
 func DefaultConfig() Config {
 	return Config{
-		ZhOpen: "{{zh}}", ZhClose: "{{/zh}}",
-		JpOpen: "{{jp}}", JpClose: "{{/jp}}",
 		EnableZh:          true,
-		EnableJp:          true,
+		EnableJa:          true,
 		TagAsciiAdjacent:  false,
 		IDNSecondLabelMax: 3,
 	}
+}
+
+// open/close returns the wrapping strings for a code under the config's mode.
+func (c Config) wrap(code langCode) (open, close string) {
+	switch c.Mode {
+	case ModeMarkers:
+		return fmt.Sprintf("{{%s}}", code), fmt.Sprintf("{{/%s}}", code)
+	case ModePassthrough:
+		return fmt.Sprintf("<!--lang:%s-->", code), "<!--/lang-->"
+	case ModeSpans:
+		return fmt.Sprintf(`<span lang="%s">`, htmlLang[code]), "</span>"
+	}
+	return "", ""
 }
 
 // --- script tables -----------------------------------------------------------
@@ -59,8 +108,6 @@ func DefaultConfig() Config {
 var scripts = []*unicode.RangeTable{unicode.Han, unicode.Hiragana, unicode.Katakana}
 var kana = []*unicode.RangeTable{unicode.Hiragana, unicode.Katakana}
 
-// interiorPunct is punctuation permitted BETWEEN two script runes without
-// breaking a run. R16 ranges must be sorted ascending by Lo.
 var interiorPunct = &unicode.RangeTable{
 	R16: []unicode.Range16{
 		{Lo: 0x3001, Hi: 0x3003, Stride: 1}, // 、 。 〃
@@ -74,22 +121,17 @@ var interiorPunct = &unicode.RangeTable{
 
 var digits = &unicode.RangeTable{
 	R16: []unicode.Range16{
-		{Lo: 0x0030, Hi: 0x0039, Stride: 1}, // 0-9
-		{Lo: 0xff10, Hi: 0xff19, Stride: 1}, // fullwidth 0-9
+		{Lo: 0x0030, Hi: 0x0039, Stride: 1},
+		{Lo: 0xff10, Hi: 0xff19, Stride: 1},
 	},
 }
 
 func isScript(r rune) bool { return inAny(r, scripts) }
 func isKana(r rune) bool   { return inAny(r, kana) }
 func isDigit(r rune) bool  { return unicode.Is(digits, r) }
-func isInteriorPunct(r rune) bool {
-	return unicode.Is(interiorPunct, r)
-}
 
-// isConnector: a rune allowed INTERIOR to a run (between script runes): a
-// digit, a space, or interior CJK punctuation.
 func isConnector(r rune) bool {
-	return isDigit(r) || r == ' ' || isInteriorPunct(r)
+	return isDigit(r) || r == ' ' || unicode.Is(interiorPunct, r)
 }
 
 func inAny(r rune, tables []*unicode.RangeTable) bool {
@@ -108,9 +150,9 @@ type edit struct {
 	str string
 }
 
-// Tag returns src with every qualifying script run wrapped in the configured
-// language delimiters. Idempotent: a run already enclosed by its delimiters is
-// left untouched.
+// Tag returns src with every qualifying run wrapped per cfg.Mode. Idempotent
+// for the active mode: a run already wrapped in that mode's delimiters is left
+// untouched.
 func Tag(src []byte, cfg Config) []byte {
 	if cfg.IDNSecondLabelMax == 0 {
 		cfg.IDNSecondLabelMax = 3
@@ -127,8 +169,6 @@ func Tag(src []byte, cfg Config) []byte {
 		case *ast.CodeSpan, *ast.RawHTML, *ast.AutoLink:
 			return ast.WalkSkipChildren, nil
 		case *ast.Link:
-			// If the link text is a verbatim substring of the destination,
-			// treat the text as URL-mirroring and skip the whole subtree.
 			if linkTextMirrorsURL(src, t) {
 				return ast.WalkSkipChildren, nil
 			}
@@ -148,7 +188,6 @@ func Tag(src []byte, cfg Config) []byte {
 	return applyEdits(src, edits)
 }
 
-// collectRuns scans src[start:stop] for qualifying runs.
 func collectRuns(src []byte, start, stop int, cfg Config, edits *[]edit) {
 	i := start
 	for i < stop {
@@ -156,8 +195,6 @@ func collectRuns(src []byte, start, stop int, cfg Config, edits *[]edit) {
 		if size == 0 {
 			break
 		}
-		// A run may begin on a script rune, or on a digit that is immediately
-		// (across spaces) followed by a script rune within the run.
 		startsRun := isScript(r) || (isDigit(r) && digitLeadsToScript(src, i, stop))
 		if !startsRun {
 			i += size
@@ -186,37 +223,33 @@ func collectRuns(src []byte, start, stop int, cfg Config, edits *[]edit) {
 			}
 			break
 		}
-		if lastScriptEnd < 0 { // no script rune actually seen (shouldn't happen)
+		if lastScriptEnd < 0 {
 			i += size
 			continue
 		}
-		runEnd := lastScriptEnd // trim any trailing connectors
+		runEnd := lastScriptEnd
 
 		if shouldSkip(src, runStart, runEnd, cfg) {
 			i = runEnd
 			continue
 		}
-		open, close_ := cfg.ZhOpen, cfg.ZhClose
+		code := zh
 		if hasKana {
-			if !cfg.EnableJp {
-				i = runEnd
-				continue
-			}
-			open, close_ = cfg.JpOpen, cfg.JpClose
-		} else if !cfg.EnableZh {
+			code = ja
+		}
+		if (code == zh && !cfg.EnableZh) || (code == ja && !cfg.EnableJa) {
 			i = runEnd
 			continue
 		}
-		if !alreadyWrapped(src, runStart, runEnd, open, close_) {
+		open, close := cfg.wrap(code)
+		if !alreadyWrapped(src, runStart, runEnd, open, close) {
 			*edits = append(*edits, edit{at: runStart, str: open})
-			*edits = append(*edits, edit{at: runEnd, str: close_})
+			*edits = append(*edits, edit{at: runEnd, str: close})
 		}
 		i = runEnd
 	}
 }
 
-// digitLeadsToScript reports whether the digits/spaces starting at i reach a
-// script rune before any other character. Lets "8月" / "8 月" start a run.
 func digitLeadsToScript(src []byte, i, stop int) bool {
 	j := i
 	for j < stop {
@@ -233,25 +266,16 @@ func digitLeadsToScript(src []byte, i, stop int) bool {
 	return false
 }
 
-// shouldSkip applies the URL/IDN/ascii-adjacent heuristics.
 func shouldSkip(src []byte, start, end int, cfg Config) bool {
-	// URL scheme: run touches "://" just before it.
 	if start >= 3 && string(src[start-3:start]) == "://" {
 		return true
 	}
-	// "www." immediately before the run.
 	if start >= 4 && strings.EqualFold(string(src[start-4:start]), "www.") {
 		return true
 	}
-	// ascii-han-ascii: an ASCII letter immediately adjacent on either side,
-	// unless explicitly enabled.
 	if !cfg.TagAsciiAdjacent && (asciiLetterBefore(src, start) || asciiLetterAfter(src, end)) {
 		return true
 	}
-	// IDN host: skip if the run is the label on EITHER side of a dot in a
-	// "<label>.<label>" host, where the OTHER label is short (≤max glyphs).
-	//   forward:  <run>.<shortlabel>   e.g. 例子.測試 , 台灣.com
-	//   backward: <shortlabel>.<run>   e.g. 例子.測試 (the 測試 side)
 	if idnForward(src, start, end, cfg.IDNSecondLabelMax) || idnBackward(src, start, cfg.IDNSecondLabelMax) {
 		return true
 	}
@@ -265,6 +289,7 @@ func asciiLetterBefore(src []byte, start int) bool {
 	r, _ := utf8.DecodeLastRune(src[:start])
 	return isASCIILetter(r)
 }
+
 func asciiLetterAfter(src []byte, end int) bool {
 	if end >= len(src) {
 		return false
@@ -272,13 +297,11 @@ func asciiLetterAfter(src []byte, end int) bool {
 	r, _ := utf8.DecodeRune(src[end:])
 	return isASCIILetter(r)
 }
+
 func isASCIILetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-// idnForward reports whether the run at [start:end] is followed by ".<label>"
-// where label is a short glyph sequence (≤max glyphs) — a likely IDN host with
-// this run as the FIRST label.
 func idnForward(src []byte, start, end, max int) bool {
 	if end >= len(src) || src[end] != '.' {
 		return false
@@ -300,17 +323,12 @@ func idnForward(src []byte, start, end, max int) bool {
 	return glyphs >= 1 && glyphs <= max
 }
 
-// idnBackward reports whether the run at start is immediately preceded by
-// "<label>." where label is a short glyph sequence (≤max glyphs) — a likely IDN
-// host with this run as a later label.
 func idnBackward(src []byte, start, max int) bool {
 	if start == 0 || src[start-1] != '.' {
 		return false
 	}
-	// walk back over the label before the dot
-	j := start - 1 // at the dot
 	glyphs := 0
-	k := j
+	k := start - 1
 	for k > 0 {
 		r, sz := utf8.DecodeLastRune(src[:k])
 		if sz == 0 {
@@ -326,8 +344,6 @@ func idnBackward(src []byte, start, max int) bool {
 	return glyphs >= 1 && glyphs <= max
 }
 
-// linkTextMirrorsURL reports whether the link's rendered text is a verbatim
-// substring of its destination URL.
 func linkTextMirrorsURL(src []byte, l *ast.Link) bool {
 	var txt strings.Builder
 	for c := l.FirstChild(); c != nil; c = c.NextSibling() {
@@ -335,17 +351,17 @@ func linkTextMirrorsURL(src []byte, l *ast.Link) bool {
 			txt.Write(src[t.Segment.Start:t.Segment.Stop])
 		}
 	}
-	text := strings.TrimSpace(txt.String())
-	if text == "" {
+	t := strings.TrimSpace(txt.String())
+	if t == "" {
 		return false
 	}
-	return strings.Contains(string(l.Destination), text)
+	return strings.Contains(string(l.Destination), t)
 }
 
-func alreadyWrapped(src []byte, start, end int, open, close_ string) bool {
+func alreadyWrapped(src []byte, start, end int, open, close string) bool {
 	pre := start - len(open)
 	if pre >= 0 && string(src[pre:start]) == open {
-		if end+len(close_) <= len(src) && string(src[end:end+len(close_)]) == close_ {
+		if end+len(close) <= len(src) && string(src[end:end+len(close)]) == close {
 			return true
 		}
 	}
@@ -355,7 +371,7 @@ func alreadyWrapped(src []byte, start, end int, open, close_ string) bool {
 func applyEdits(src []byte, edits []edit) []byte {
 	sort.SliceStable(edits, func(a, b int) bool { return edits[a].at < edits[b].at })
 	var b strings.Builder
-	b.Grow(len(src) + len(edits)*8)
+	b.Grow(len(src) + len(edits)*12)
 	prev := 0
 	for _, e := range edits {
 		b.Write(src[prev:e.at])
