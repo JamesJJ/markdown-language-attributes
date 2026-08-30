@@ -224,3 +224,20 @@ func TestAlreadyMarkedContentIsNoOp(t *testing.T) {
 		t.Fatalf("already-marked content was modified:\n in:  %q\n got: %q", in, got)
 	}
 }
+
+func TestMinimalAlreadyMarkedIsNoOp(t *testing.T) {
+	// A single already-wrapped character round-trips unchanged (RawHTML block).
+	in := "<!--lang:zh-->愛<!--/lang-->"
+	for _, m := range ValidModes {
+		if got := tagMode(in, m); got != in {
+			t.Errorf("mode %s modified marked content:\n in:  %q\n got: %q", m, in, got)
+		}
+	}
+}
+
+func TestFencedCodeUntouched(t *testing.T) {
+	in := "```\n台灣\n```\n"
+	if got := tagMode(in, ModeMarkers); got != in {
+		t.Fatalf("fenced code was modified: %q", got)
+	}
+}
